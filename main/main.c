@@ -24,7 +24,7 @@ const char* token = "BGv0J1pTjJCoi06NhEpra6JQokCe1ubhUmKnzO5nTA";
 uint8_t q_unlock = 0;
 uint8_t f_unlock = 0;
 uint8_t f_done = 0;
-uint16_t f_conn_id = 0;
+uint16_t f_air = 0;
 uint8_t f_off = 0;
 
 static uint8_t adv_service_uuid128[16] = {
@@ -346,7 +346,7 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                     else if(match_key("forever", res[1].data, 7, res[1].len)) {
                         if(size == 3) {
                             if(match_key("air", res[2].data, 3, res[2].len)) {
-                                f_conn_id = param->write.conn_id;
+                                f_air = 1;
                                 f_done = 0;
                                 f_unlock = 1;
                             }
@@ -358,24 +358,25 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                     } else if (match_key("lock", res[1].data, 4, res[1].len)) {
                         if(size == 3) {
                             if(match_key("air", res[2].data, 3, res[2].len)) {
-                                if(f_conn_id == param->write.conn_id && !f_off) {
+                                if(f_air && !f_off) {
                                     gpio_set_level(2, 0);
                                 }
-                                f_conn_id = 0;
+                                f_air = 0;
                             }
                         } else {
-                            if(f_off && !f_conn_id) {
+                            if(!f_air) {
                                 gpio_set_level(2, 0);
                             }
-                            f_off = 0;
+                            if(f_unlock) f_off = 0;
                         };
-                    } else if(size == 1) {
-                        if(!f_conn_id) {
-                            q_unlock = 1;
-                            f_unlock = 0;
-                        }
+                    }
+                } else if(size == 1) {
+                    if(!f_air) {
+                        q_unlock = 1;
+                        f_unlock = 0;
                     }
                 }
+                
             };
         }
 
