@@ -336,14 +336,25 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
 
         if(size) {
             if(match_key(token, res[0].data, 42, res[0].len)) {
-                if(size == 1) {
-                    q_unlock = 1;
-                    f_unlock = 0;
-                }
-                if(size == 2) {
-                    if(match_key("forever", res[1].data, 7, res[1].len)) {
-                        f_done = 0;
-                        f_unlock = 1;
+                if(size > 1) {
+                    if(match_key("air", res[1].data, 3, res[1].len)) {
+                        if(!f_unlock) {
+                            q_unlock = 1;
+                            f_unlock = 0;
+                        }
+                    }
+                    else if(match_key("forever", res[1].data, 7, res[1].len)) {
+                        if(size == 3) {
+                            if(match_key("air", res[2].data, 3, res[2].len)) {
+                                f_air = 1;
+                                f_done = 0;
+                                f_unlock = 1;
+                            }
+                        } else {
+                            f_done = 0;
+                            f_unlock = 1;
+                            f_off = 1;
+                        };
                     } else if (match_key("lock", res[1].data, 4, res[1].len)) {
                         if(size == 3) {
                             if(match_key("air", res[2].data, 3, res[2].len)) {
