@@ -367,7 +367,7 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                             if(!f_air) {
                                 gpio_set_level(2, 0);
                             }
-                            if(f_unlock) f_off = 0;
+                            f_off = 0;
                         };
                     }
                 } else if(size == 1) {
