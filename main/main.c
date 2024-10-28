@@ -360,12 +360,16 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                             if(match_key("air", res[2].data, 3, res[2].len)) {
                                 if(f_air && !f_off) {
                                     gpio_set_level(2, 0);
+                                    f_unlock = 0;
+                                    f_done = 0;
                                 }
                                 f_air = 0;
                             }
                         } else {
                             if(!f_air) {
                                 gpio_set_level(2, 0);
+                                f_unlock = 0;
+                                f_done = 0;
                             }
                             if(f_unlock) f_off = 0;
                         };
