@@ -14,6 +14,7 @@
 #include <esp_bt_device.h>
 #include <esp_gap_ble_api.h>
 #include <esp_gatts_api.h>
+#include <esp_gattc_api.h>
 #include <esp_gatt_common_api.h>
 
 #include <freertos/FreeRTOS.h>
@@ -21,10 +22,14 @@
 
 const char* token = "BGv0J1pTjJCoi06NhEpra6JQokCe1ubhUmKnzO5nTA";
 
+uint8_t watch_addr[6] = {0xCB, 0x56, 0x00, 0x24, 0xDB, 0x7E};
+uint16_t watch_conn_id = 0;
+uint16_t watch_srvc_handle = 0;
+
 uint8_t q_unlock = 0;
 uint8_t f_unlock = 0;
 uint8_t f_done = 0;
-uint16_t f_air = 0;
+uint8_t f_air = 0;
 uint8_t f_off = 0;
 
 static uint8_t adv_service_uuid128[16] = {
@@ -120,6 +125,7 @@ void wifi_unlock(void* event_handler_arg, const char* event_base, int32_t event,
 void unlock(void*);
 static void esp_ble_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
 void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_cb_param_t* param);
+void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_cb_param_t* param);
 uint8_t connected_count();
 void auth_task(void*);
 void authorize(uint16_t conn_id);
@@ -208,6 +214,7 @@ void app_main(void)
 
         esp_ble_gap_register_callback(esp_ble_gap_cb);
         esp_ble_gatts_register_callback(esp_gatts_cb);
+        esp_ble_gattc_register_callback(esp_gattc_cb);
 
         /*
         esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
@@ -219,7 +226,8 @@ void app_main(void)
         esp_bt_gap_set_pin(pin_type, 0, pin_code);
         */
     
-        esp_ble_gatts_app_register(0);
+        //esp_ble_gatts_app_register(0);
+        esp_ble_gattc_app_register(1);
 
         esp_ble_gatt_set_local_mtu(200);
 
@@ -233,8 +241,8 @@ void app_main(void)
 
     } else printf("Bluetooth fail\n");
 
-    xTaskCreate(unlock, "unlock", 1024, NULL, 5, NULL);
-    xTaskCreate(auth_task, "auth", 1024, NULL, 5, NULL);
+    //xTaskCreate(unlock, "unlock", 1024, NULL, 5, NULL);
+    //xTaskCreate(auth_task, "auth", 1024, NULL, 5, NULL);
 }
 
 int match_key(const char* key, char* recv_key, int osize, int rsize) {
@@ -279,6 +287,54 @@ static void esp_ble_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t*
         break;
     }
 };
+
+void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_cb_param_t* param) {
+    switch (event)
+    {
+    case ESP_GATTC_REG_EVT:
+        printf("BLE Client registered\n");
+        if(esp_ble_gattc_open(itf, watch_addr, 0, true)) {
+            printf("Error connecting\n");
+        };
+        break;
+    
+    case ESP_GATTC_CONNECT_EVT:
+        printf("Watch connected\n");
+        watch_conn_id = param->connect.conn_id;
+        break;
+
+    case ESP_GATTC_DIS_SRVC_CMPL_EVT:
+        esp_ble_gattc_search_service(itf, param->dis_srvc_cmpl.conn_id, NULL);
+        break;
+
+    case ESP_GATTC_SEARCH_RES_EVT:
+        esp_gattc_char_elem_t charac;
+        uint16_t count = 1;
+        esp_ble_gattc_get_all_char(itf, param->search_res.conn_id, param->search_res.start_handle, param->search_res.end_handle,
+            &charac, &count, 1
+        );
+        uint8_t value[1] = {0};
+        count = 1;
+        esp_gattc_descr_elem_t descr;
+        esp_ble_gattc_get_all_descr(itf, param->search_res.conn_id, charac.char_handle, &descr, &count, 0);
+        esp_ble_gattc_register_for_notify(itf, watch_addr, charac.char_handle);
+        esp_ble_gattc_write_char_descr(itf, param->search_res.conn_id, descr.handle, 1, value, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+
+        break;
+
+    case ESP_GATTC_NOTIFY_EVT:
+        printf("Received value: ");
+        for(int i = 0; i < param->notify.value_len; i++) {
+            printf("%d ", (int)param->notify.value[i]);
+        }
+        printf("\n");
+
+        break;
+
+    default:
+        break;
+    }
+}
 
 void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_cb_param_t* param) {
     switch (event)
