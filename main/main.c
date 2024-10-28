@@ -338,7 +338,7 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
             if(match_key(token, res[0].data, 42, res[0].len)) {
                 if(size > 1) {
                     if(match_key("air", res[1].data, 3, res[1].len)) {
-                        if(!f_unlock) {
+                        if(!f_off && !f_air) {
                             q_unlock = 1;
                             f_unlock = 0;
                         }
@@ -360,18 +360,14 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                             if(match_key("air", res[2].data, 3, res[2].len)) {
                                 if(f_air && !f_off) {
                                     gpio_set_level(2, 0);
-                                    f_unlock = 0;
-                                    f_done = 0;
                                 }
                                 f_air = 0;
                             }
                         } else {
                             if(!f_air) {
                                 gpio_set_level(2, 0);
-                                f_unlock = 0;
-                                f_done = 0;
                             }
-                            if(f_unlock) f_off = 0;
+                            f_off = 0;
                         };
                     }
                 } else if(size == 1) {
