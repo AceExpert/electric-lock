@@ -23,8 +23,6 @@
 const char* token = "BGv0J1pTjJCoi06NhEpra6JQokCe1ubhUmKnzO5nTA";
 
 uint8_t watch_addr[6] = {0xCB, 0x56, 0x00, 0x24, 0xDB, 0x7E};
-uint16_t watch_conn_id = 0;
-uint16_t watch_srvc_handle = 0;
 
 uint8_t q_unlock = 0;
 uint8_t f_unlock = 0;
@@ -42,6 +40,14 @@ struct connection_t {
     uint8_t auth;
     time_t at;
 };
+
+struct client_profile {
+    uint16_t start_handle; uint16_t end_handle;
+    esp_gatt_if_t itf; uint16_t conn_id;
+    uint16_t conn_handle;
+    uint16_t char_handle;
+    uint16_t descr_handle;
+} watch_profile;
 
 struct connection_t connected[3] = {
     {.connected = false}, {.connected = false}, {.connected = false}
@@ -296,32 +302,48 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
         if(esp_ble_gattc_open(itf, watch_addr, 0, true)) {
             printf("Error connecting\n");
         };
+        watch_profile.itf = itf;
         break;
     
     case ESP_GATTC_CONNECT_EVT:
         printf("Watch connected\n");
-        watch_conn_id = param->connect.conn_id;
+        watch_profile.conn_id = param->connect.conn_id;
+        watch_profile.conn_handle = param->connect.conn_handle;
         break;
 
     case ESP_GATTC_DIS_SRVC_CMPL_EVT:
         esp_ble_gattc_search_service(itf, param->dis_srvc_cmpl.conn_id, NULL);
         break;
 
-    case ESP_GATTC_SEARCH_RES_EVT:
-        esp_gattc_char_elem_t charac;
-        uint16_t count = 1;
-        esp_ble_gattc_get_all_char(itf, param->search_res.conn_id, param->search_res.start_handle, param->search_res.end_handle,
-            &charac, &count, 1
-        );
-        uint8_t value[1] = {0};
-        count = 1;
-        esp_gattc_descr_elem_t descr;
-        esp_ble_gattc_get_all_descr(itf, param->search_res.conn_id, charac.char_handle, &descr, &count, 0);
-        esp_ble_gattc_register_for_notify(itf, watch_addr, charac.char_handle);
-        esp_ble_gattc_write_char_descr(itf, param->search_res.conn_id, descr.handle, 1, value, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+    case ESP_GATTC_SEARCH_RES_EVT: {
 
+        watch_profile.start_handle = param->search_res.start_handle;
+        watch_profile.end_handle = param->search_res.end_handle;
         break;
-
+    }
+    case ESP_GATTC_SEARCH_CMPL_EVT: {
+        esp_gattc_char_elem_t charac[2];
+        uint16_t count = 2;
+        esp_bt_uuid_t uuid = {
+            .len = 16,
+            .uuid.uuid128 = {0x6e, 0x40, 0x00, 0x03, 0xb5, 0xa3, 0xf3, 0x93, 0xe0, 0xa9, 0xe5, 0x0e, 0x24, 0xdc, 0xca, 0x9e}
+        };
+        esp_ble_gattc_get_all_char(itf, watch_profile.conn_id, watch_profile.start_handle, watch_profile.end_handle, charac, &count, 6);
+        printf("charac: %d\n", charac[0].properties);
+        watch_profile.char_handle = charac[0].char_handle;
+        esp_ble_gattc_register_for_notify(itf, watch_addr, charac[0].char_handle);        
+        break;
+    }
+    case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
+        printf("Notify reg: %d\n", param->reg_for_notify.status);
+        uint8_t value[1] = {0};
+        uint16_t count = 1;
+        esp_gattc_descr_elem_t descr;
+        esp_ble_gattc_get_all_descr(itf, param->search_res.conn_id, watch_profile.char_handle, &descr, &count, 0);
+        printf("descr: %d\n", count);
+        esp_ble_gattc_write_char_descr(itf, param->search_res.conn_id, descr.handle, 1, value, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+        break;
+    }
     case ESP_GATTC_NOTIFY_EVT:
         printf("Received value: ");
         for(int i = 0; i < param->notify.value_len; i++) {
