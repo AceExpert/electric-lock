@@ -24,6 +24,8 @@ const char* token = "BGv0J1pTjJCoi06NhEpra6JQokCe1ubhUmKnzO5nTA";
 uint8_t q_unlock = 0;
 uint8_t f_unlock = 0;
 uint8_t f_done = 0;
+uint16_t f_conn_id = 0;
+uint8_t f_off = 0;
 
 static uint8_t adv_service_uuid128[16] = {
     0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00,
@@ -317,7 +319,6 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                 if(match_key(token, res[0].data, 42, res[0].len)) {
                     if(match_key("auth", res[1].data, 4, res[1].len)) {
                         authorize(param->write.conn_id);
-                        break;
                     } else {
                         esp_ble_gatts_close(itf, param->write.conn_id);
                         remove_conn(param->write.conn_id);
@@ -330,21 +331,50 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                 esp_ble_gatts_close(itf, param->write.conn_id);
                 remove_conn(param->write.conn_id);
             }
+            break;
         };
 
         if(size) {
             if(match_key(token, res[0].data, 42, res[0].len)) {
-                if(size == 1) {
-                    q_unlock = 1;
-                    f_unlock = 0;
-                }
-                if(size == 2) {
-                    if(match_key("forever", res[1].data, 7, res[1].len)) {
-                        f_done = 0;
-                        f_unlock = 1;
+                if(size > 1) {
+                    if(match_key("air", res[1].data, 3, res[1].len)) {
+                        if(!f_unlock) {
+                            q_unlock = 1;
+                            f_unlock = 0;
+                        }
+                    }
+                    else if(match_key("forever", res[1].data, 7, res[1].len)) {
+                        if(size == 3) {
+                            if(match_key("air", res[2].data, 3, res[2].len)) {
+                                f_conn_id = param->write.conn_id;
+                                f_done = 0;
+                                f_unlock = 1;
+                            }
+                        } else {
+                            f_done = 0;
+                            f_unlock = 1;
+                            f_off = 1;
+                        };
                     } else if (match_key("lock", res[1].data, 4, res[1].len)) {
-                        gpio_set_level(2, 0);
-                    };
+                        if(size == 3) {
+                            if(match_key("air", res[2].data, 3, res[2].len)) {
+                                if(f_conn_id == param->write.conn_id && !f_off) {
+                                    gpio_set_level(2, 0);
+                                }
+                                f_conn_id = 0;
+                            }
+                        } else {
+                            if(f_off && !f_conn_id) {
+                                gpio_set_level(2, 0);
+                            }
+                            f_off = 0;
+                        };
+                    } else if(size == 1) {
+                        if(!f_conn_id) {
+                            q_unlock = 1;
+                            f_unlock = 0;
+                        }
+                    }
                 }
             };
         }
