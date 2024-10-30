@@ -28,9 +28,9 @@ uint8_t watch_addr[6] = {0xCB, 0x56, 0x00, 0x24, 0xDB, 0x7E};
 const char watch_on[] = {1, 5, 6, 0, 2, 1};
 const char watch_off[] = {1, 5, 6, 0, 2, 2};
 
-struct {
+struct rssi_rec {
     int8_t rssi;
-    time_t at;
+    clock_t at;
 } rssi_record[200] = {};
 
 struct {
@@ -303,44 +303,67 @@ void wifi_unlock(void* event_handler_arg, const char* event_base, int32_t event,
     q_unlock = 1;
 };
 
+int arr_sum(struct rssi_rec* arr, int size) {
+    int sum = 0;
+    for(int i = 2; i < size + 2; i++) sum += arr[i].rssi;
+    return sum;
+}  
+
 static void esp_ble_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
     switch (event)
     {
     case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
-        
+        esp_ble_gap_start_advertising(&adv_params);
         break;
 
     case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT: {
         if(param->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS) {
 
-
             if(!last_rssi) {
                 last_rssi = param->read_rssi_cmpl.rssi;
-                rssi_record[0].at = time(NULL);
+                rssi_record[0].at = clock();
+                rssi_record[1].at = 0;
             }
             else {
                 int32_t change = (int32_t)ABS(param->read_rssi_cmpl.rssi - last_rssi);
                 //rssi_rate_record[rssi_rate_len++].rssi_rate = rate;
                 if(param->read_rssi_cmpl.rssi > last_rssi && change > 20) {
-                    printf("RSSI: %d\n", param->read_rssi_cmpl.rssi);
                     rssi_record[0].rssi = param->read_rssi_cmpl.rssi;
-                    rssi_record[0].at = time(NULL);
+                    rssi_record[0].at = clock();
                     last_rssi = param->read_rssi_cmpl.rssi;
+
                 }
                 else if(change < 10) {
-                    printf("RSSI: %d\n", param->read_rssi_cmpl.rssi);
                     rssi_record[0].rssi = param->read_rssi_cmpl.rssi;
-                    rssi_record[0].at = time(NULL);
+                    rssi_record[0].at = clock();
                     last_rssi = param->read_rssi_cmpl.rssi;
-                } else if (change > 10 && (time(NULL) - rssi_record[0].at > 1) && change < 25) {
-                    printf("RSSI: %d\n", param->read_rssi_cmpl.rssi);
-                    rssi_record[0].rssi = param->read_rssi_cmpl.rssi;
-                    rssi_record[0].at = time(NULL);
-                    last_rssi = param->read_rssi_cmpl.rssi;                    
+
+                } else if (change > 10 && change < 25) {
+                    if((clock() - rssi_record[0].at > 0.03) || (rssi_record[1].at && ((clock() - rssi_record[1].at) > 0.3))) {
+                        rssi_record[0].rssi = param->read_rssi_cmpl.rssi;
+                        rssi_record[0].at = clock();
+                        last_rssi = param->read_rssi_cmpl.rssi;
+                        if(rssi_record[1].at) rssi_record[1].at = 0;
+                    } else {
+                        if(!rssi_record[1].at) rssi_record[1].at = clock();
+                    }
+               
+                }
+                printf("RSSI: %d\n", last_rssi);
+                if(rssi_len < 20)
+                    rssi_record[2 + rssi_len++].rssi = last_rssi;
+                else {
+                    if(arr_sum(rssi_record + 2, 20) / 20 > -44) {
+                        if(!f_off && !f_air) {
+                            q_unlock = 1;
+                            f_unlock = 0;
+                        }
+                    }
+                    rssi_len = 0;
                 }
             }
         };
-        //esp_ble_gap_read_rssi(watch_addr);
+        if(watch_profile.connected) esp_ble_gap_read_rssi(watch_addr);
         break;
     }
 
@@ -361,14 +384,18 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
         break;
     
     case ESP_GATTC_CONNECT_EVT:
-        printf("Watch connected\n");
-        watch_profile.conn_id = param->connect.conn_id;
-        watch_profile.conn_handle = param->connect.conn_handle;
-
-        //esp_ble_gap_read_rssi(watch_addr);
+        if(match_key((char*)watch_addr, (char*)param->connect.remote_bda, 6, 6)) {
+            esp_ble_gap_stop_advertising();
+            printf("Watch connected\n");
+            esp_ble_gap_read_rssi(watch_addr);
+            watch_profile.conn_id = param->connect.conn_id;
+            watch_profile.conn_handle = param->connect.conn_handle;
+            watch_profile.connected = 1;
+        };
         break;
 
     case ESP_GATTC_DIS_SRVC_CMPL_EVT:
+        if(connected_count() < 3) esp_ble_gap_start_advertising(&adv_params);
 
         esp_gattc_service_elem_t services[5];
         uint16_t count = 5;
@@ -403,7 +430,6 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
         printf("Notify reg: %d\n", param->reg_for_notify.status);
         uint8_t notify[1] = {1};
         esp_ble_gattc_write_char_descr(itf, watch_profile.conn_id, watch_profile.descr_handle, 2, notify, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
-        esp_ble_gap_start_advertising(&adv_params);
         break;
     }
 
@@ -426,7 +452,13 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
         }
 
         break;
-
+    
+    case ESP_GATTC_DISCONNECT_EVT:
+        if(match_key((char*)watch_addr, (char*)param->disconnect.remote_bda, 6, 6)) {
+            if(connected_count() < 3) esp_ble_gap_start_advertising(&adv_params);
+            watch_profile.connected = 0;
+            esp_ble_gattc_open(itf, watch_addr, 0, true);
+        }
     default:
         break;
     }
@@ -562,23 +594,28 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
 
     case ESP_GATTS_CONNECT_EVT: {
         esp_ble_conn_update_params_t conn_params = {0};
-        if(connected_count() < 3 && watch_profile.connected) esp_ble_gap_start_advertising(&adv_params);
+        if(!match_key((char*)watch_addr, (char*)param->connect.remote_bda, 6, 6)) {
+            if(connected_count() < 3) esp_ble_gap_start_advertising(&adv_params);
+            add_conn(param);
+            show_bluetooth_addr(param->connect.remote_bda);
+        };
         memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
         conn_params.latency = 0;
         conn_params.max_int = 0x20;    // max_int = 0x20*1.25ms = 40ms
         conn_params.min_int = 0x10;    // min_int = 0x10*1.25ms = 20ms
         conn_params.timeout = 400;    // timeout = 400*10ms = 4000ms
-        gatts_profile[0].conn_id = param->connect.conn_id;
         //start sent the update connection parameters to the peer device.
-        show_bluetooth_addr(param->connect.remote_bda);
+        
         esp_ble_gap_update_conn_params(&conn_params);
-        add_conn(param);
+        
         break;
     }
 
     case ESP_GATTS_DISCONNECT_EVT: {
-        remove_conn(param->disconnect.conn_id);
-        esp_ble_gap_start_advertising(&adv_params);
+        if(!match_key((char*)watch_addr, (char*)param->connect.remote_bda, 6, 6)) {
+            remove_conn(param->disconnect.conn_id);
+            esp_ble_gap_start_advertising(&adv_params);
+        };
         break;
     }
 
