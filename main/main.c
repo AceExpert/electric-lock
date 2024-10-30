@@ -387,7 +387,7 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
         if(match_key((char*)watch_addr, (char*)param->connect.remote_bda, 6, 6)) {
             esp_ble_gap_stop_advertising();
             printf("Watch connected\n");
-            esp_ble_gap_read_rssi(watch_addr);
+            //esp_ble_gap_read_rssi(watch_addr);
             watch_profile.conn_id = param->connect.conn_id;
             watch_profile.conn_handle = param->connect.conn_handle;
             watch_profile.connected = 1;
