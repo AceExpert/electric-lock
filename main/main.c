@@ -28,24 +28,31 @@ uint8_t watch_addr[6] = {0xCB, 0x56, 0x00, 0x24, 0xDB, 0x7E};
 const char watch_on[] = {1, 5, 6, 0, 2, 1};
 const char watch_off[] = {1, 5, 6, 0, 2, 2};
 
+uint8_t locked = 1;
+time_t lock_time;
+
+TaskHandle_t unlock_task = NULL;
+TaskHandle_t watch_task = NULL;
+
+time_t watch_air = 0;
+
 struct rssi_rec {
     int8_t rssi;
     clock_t at;
-} rssi_record[200] = {};
+} rssi_record[120] = {};
 
-struct {
-    float rssi_rate;
-    time_t at;
-} rssi_rate_record[200] = {};
-
-int8_t rssi_rate_len = 0;
 int8_t rssi_len = 0;
 int8_t last_rssi = 0;
+int8_t hold_rssi = 0;
+
+clock_t last_rssi_time = 0.0;
+clock_t hold_rssi_time = 0.0;
+clock_t wc_time = 0.0;
+clock_t avg_time = 0.0;
+
 int8_t avg_rssi = 0;
 
-uint8_t q_unlock = 0;
 uint8_t f_unlock = 0;
-uint8_t f_done = 0;
 uint8_t f_air = 0;
 uint8_t f_off = 0;
 
@@ -158,6 +165,7 @@ void authorize(uint16_t conn_id);
 uint8_t get_auth(uint16_t conn_id);
 void add_conn(esp_ble_gatts_cb_param_t* conn_p);
 void remove_conn(uint16_t conn_id);
+void watch_connect_task(void*);
 
 void show_bluetooth_addr(esp_bd_addr_t addr) {
     for(int i = 0; i < 6; i++) {
@@ -192,6 +200,8 @@ int split(unsigned char* text, char delim, int size, struct split_res* out) {
 void app_main(void)
 {
     watch_profile.connected = 0;
+    lock_time = time(NULL);
+
     printf("Central Lock Controller started\n");
  
     esp_err_t ret = nvs_flash_init();
@@ -268,8 +278,7 @@ void app_main(void)
 
     } else printf("Bluetooth fail\n");
 
-    xTaskCreate(unlock, "unlock", 1024, NULL, 5, NULL);
-    xTaskCreate(auth_task, "auth", 1024, NULL, 5, NULL);
+    xTaskCreate(auth_task, "auth", 1024, NULL, 4, NULL);
 }
 
 int match_key(const char* key, char* recv_key, int osize, int rsize) {
@@ -282,25 +291,15 @@ int match_key(const char* key, char* recv_key, int osize, int rsize) {
 };
 
 void unlock(void*) {
-    while (1) {
-        if(f_unlock && !f_done) {
-            gpio_set_level(2, 1);
-            f_done = 1;
-        };
-        if(q_unlock && !f_unlock) {
-            f_done = 0;
-            gpio_set_level(2, 1);
-            vTaskDelay(1000 * 5 / portTICK_PERIOD_MS);
-            gpio_set_level(2, 0);
-            q_unlock = 0;
-        }
-    };
+    gpio_set_level(2, 1);
+    vTaskDelay(1000 * 5 / portTICK_PERIOD_MS);
+    gpio_set_level(2, 0);
+    unlock_task = NULL;
+    vTaskDelete(NULL);
 };
 
 void wifi_unlock(void* event_handler_arg, const char* event_base, int32_t event, void* data) {
-    f_unlock = 0;
-    f_done = 0;
-    q_unlock = 1;
+    if(!gpio_get_level(2)) xTaskCreate(unlock, "unlock", 1024, NULL, 3, &unlock_task);
 };
 
 int arr_sum(struct rssi_rec* arr, int size) {
@@ -318,51 +317,124 @@ static void esp_ble_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t*
 
     case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT: {
         if(param->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-
             if(!last_rssi) {
                 last_rssi = param->read_rssi_cmpl.rssi;
-                rssi_record[0].at = clock();
-                rssi_record[1].at = 0;
-            }
-            else {
-                int32_t change = (int32_t)ABS(param->read_rssi_cmpl.rssi - last_rssi);
-                //rssi_rate_record[rssi_rate_len++].rssi_rate = rate;
-                if(param->read_rssi_cmpl.rssi > last_rssi && change > 20) {
-                    rssi_record[0].rssi = param->read_rssi_cmpl.rssi;
-                    rssi_record[0].at = clock();
-                    last_rssi = param->read_rssi_cmpl.rssi;
+                last_rssi_time = clock();
+            } else {
+                if(hold_rssi) {
+                    int change = param->read_rssi_cmpl.rssi - hold_rssi;
+                    int abs_change = ABS(change);
 
-                }
-                else if(change < 10) {
-                    rssi_record[0].rssi = param->read_rssi_cmpl.rssi;
-                    rssi_record[0].at = clock();
-                    last_rssi = param->read_rssi_cmpl.rssi;
-
-                } else if (change > 10 && change < 25) {
-                    if((clock() - rssi_record[0].at > 0.03) || (rssi_record[1].at && ((clock() - rssi_record[1].at) > 0.3))) {
-                        rssi_record[0].rssi = param->read_rssi_cmpl.rssi;
-                        rssi_record[0].at = clock();
+                    if(abs_change <= 10 && (clock() - hold_rssi_time) > 2.0) {
                         last_rssi = param->read_rssi_cmpl.rssi;
-                        if(rssi_record[1].at) rssi_record[1].at = 0;
-                    } else {
-                        if(!rssi_record[1].at) rssi_record[1].at = clock();
+                        last_rssi_time = clock();
+                        hold_rssi = 0;
+                        hold_rssi_time = 0.0;
+                    } else if (change > 0 && abs_change >= 20 && ((ABS(param->read_rssi_cmpl.rssi - last_rssi)) <= 20)) {
+                        last_rssi = param->read_rssi_cmpl.rssi;
+                        last_rssi_time = clock();
+                        hold_rssi = 0;
+                        hold_rssi_time = 0.0;                       
+                    } else if (clock() - hold_rssi_time > 3.0) {
+                        last_rssi = param->read_rssi_cmpl.rssi;
+                        last_rssi_time = clock();
+                        hold_rssi = 0;
+                        hold_rssi_time = 0.0;                         
                     }
-               
+                } else {
+                    int change = param->read_rssi_cmpl.rssi - last_rssi;
+                    int abs_change = ABS(change);
+
+                    if(abs_change <= 8) {
+                        last_rssi = param->read_rssi_cmpl.rssi;
+                        last_rssi_time = clock();
+                    } else {
+                        if(change > 0 && abs_change >= 20) {
+                            last_rssi = param->read_rssi_cmpl.rssi;
+                            last_rssi_time = clock();
+                        } else if (change < 0 && abs_change >= 25 && abs_change <= 40) {
+                            hold_rssi = param->read_rssi_cmpl.rssi;
+                            hold_rssi_time = clock();
+                        }/* else if (abs_change > 40) {
+                            if(wc_time && clock() - wc_time >= 6) {
+                                last_rssi = param->read_rssi_cmpl.rssi;
+                                last_rssi_time = clock();
+                                wc_time = 0.0;
+                            } else if (!wc_time) {
+                                wc_time = clock();
+                            }
+                        }*/
+                    }
                 }
-                printf("RSSI: %d\n", last_rssi);
-                if(rssi_len < 20)
-                    rssi_record[2 + rssi_len++].rssi = last_rssi;
-                else {
-                    if(arr_sum(rssi_record + 2, 20) / 20 > -44) {
-                        if(!f_off && !f_air) {
-                            q_unlock = 1;
-                            f_unlock = 0;
+
+                if(rssi_len < 21) {
+                    if(rssi_len) {
+                        if(ABS(last_rssi - rssi_record[rssi_len - 2].rssi) <= 15) {
+                            rssi_record[rssi_len++].rssi = last_rssi;
+                            rssi_record[rssi_len].at = clock();
+                        } else {
+                            /*if(avg_time && clock() - avg_time >= 1) {
+                                rssi_record[rssi_len++].rssi = last_rssi;
+                                rssi_record[rssi_len].at = clock();
+                                avg_time = 0.0;
+                            } else if (!avg_time) {
+                                avg_time = clock();
+                            }*/
+                            rssi_record[rssi_len].rssi = rssi_record[rssi_len - 1].rssi;
+                            rssi_record[rssi_len++].at = clock();                          
+                        }
+                    } else {
+                        rssi_record[rssi_len++].rssi = last_rssi;
+                        rssi_record[rssi_len].at = clock();                      
+                    }
+                } else {
+                    int rssi_avg = arr_sum(rssi_record, 20) / 20;
+                    int8_t final_rssi = (avg_rssi && rssi_avg < -95) ? avg_rssi : rssi_avg;
+                    //printf("RSSI: %d\n", final_rssi);
+
+                    if(final_rssi > -41) {
+                        if(!f_off && !f_air && !watch_air) {
+                            watch_air = time(NULL);
+                            if(unlock_task == NULL) xTaskCreate(unlock, "unlock", 1024, NULL, 3, &unlock_task);
+                        } else if (watch_air && (time(NULL) - watch_air > 5) && !f_air) {
+                            gpio_set_level(2, 1);
+                            f_air = 1;
+                        }
+                    } else {
+                        if(watch_air && (time(NULL) - watch_air > 5)) {
+                            gpio_set_level(2, 0);
+                            f_air = 0;
+                        }
+                        watch_air = 0;
+                    };
+
+                    if(final_rssi > -76) {
+                        if(locked) {
+                            if(!f_air && !f_off && unlock_task == NULL && ((time(NULL) - lock_time) > 5)) {
+                                printf("auto unlock\n");
+                                xTaskCreate(unlock, "unlock", 1024, NULL, 3, &unlock_task);
+                                locked = 0;
+                                
+                            }
+                            lock_time = time(NULL);           
+                        }; 
+                    } else {
+                        if(!locked) {
+                            printf("auto lock\n");
+                            locked = 1;
+                            lock_time = time(NULL);
                         }
                     }
+
+                    
+                    avg_rssi = final_rssi;
                     rssi_len = 0;
                 }
+
+
             }
         };
+        vTaskDelay(1000 * 0.005 / portTICK_PERIOD_MS);
         if(watch_profile.connected) esp_ble_gap_read_rssi(watch_addr);
         break;
     }
@@ -377,17 +449,15 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
     {
     case ESP_GATTC_REG_EVT:
         printf("BLE Client registered\n");
-        if(esp_ble_gattc_open(itf, watch_addr, 0, true)) {
-            printf("Error connecting\n");
-        };
         watch_profile.itf = itf;
+        xTaskCreate(watch_connect_task, "watch_connect", 1024, NULL, 5, &watch_task);
         break;
     
     case ESP_GATTC_CONNECT_EVT:
         if(match_key((char*)watch_addr, (char*)param->connect.remote_bda, 6, 6)) {
             esp_ble_gap_stop_advertising();
             printf("Watch connected\n");
-            //esp_ble_gap_read_rssi(watch_addr);
+            esp_ble_gap_read_rssi(watch_addr);
             watch_profile.conn_id = param->connect.conn_id;
             watch_profile.conn_handle = param->connect.conn_handle;
             watch_profile.connected = 1;
@@ -397,7 +467,7 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
     case ESP_GATTC_DIS_SRVC_CMPL_EVT:
         if(connected_count() < 3) esp_ble_gap_start_advertising(&adv_params);
 
-        esp_gattc_service_elem_t services[5];
+        esp_gattc_service_elem_t services[11];
         uint16_t count = 5;
 
         esp_ble_gattc_get_service(itf, watch_profile.conn_id, NULL, services, &count, 0);
@@ -441,8 +511,7 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
         printf("\n");
         if(match_key(watch_on, (char*)param->notify.value, 6, param->notify.value_len)) {
             if(!f_air) {
-                q_unlock = 1;
-                f_unlock = 0;
+                if(unlock_task == NULL) xTaskCreate(unlock, "unlock", 1024, NULL, 3, &unlock_task);
             };
         } else if (match_key(watch_off, (char*)param->notify.value, 6, param->notify.value_len)) {
             if(!f_air) {
@@ -457,7 +526,8 @@ void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t itf, esp_ble_gattc_c
         if(match_key((char*)watch_addr, (char*)param->disconnect.remote_bda, 6, 6)) {
             if(connected_count() < 3) esp_ble_gap_start_advertising(&adv_params);
             watch_profile.connected = 0;
-            esp_ble_gattc_open(itf, watch_addr, 0, true);
+            watch_profile.itf = itf;
+            if(watch_task == NULL) xTaskCreate(watch_connect_task, "watch_connect", 1024, NULL, 5, &watch_task);
         }
     default:
         break;
@@ -523,21 +593,18 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                 if(size > 1) {
                     if(match_key("air", res[1].data, 3, res[1].len)) {
                         if(!f_off && !f_air) {
-                            q_unlock = 1;
-                            f_unlock = 0;
+                            if(unlock_task == NULL) xTaskCreate(unlock, "unlock", 1024, NULL, 3, &unlock_task);
                         }
                     }
                     else if(match_key("forever", res[1].data, 7, res[1].len)) {
                         if(size == 3) {
                             if(match_key("air", res[2].data, 3, res[2].len)) {
                                 f_air = 1;
-                                f_done = 0;
-                                f_unlock = 1;
+                                gpio_set_level(2, 1);
                             }
                         } else {
-                            f_done = 0;
-                            f_unlock = 1;
                             f_off = 1;
+                            gpio_set_level(2, 1);
                         };
                     } else if (match_key("lock", res[1].data, 4, res[1].len)) {
                         if(size == 3) {
@@ -556,11 +623,9 @@ void esp_gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t itf, esp_ble_gatts_c
                     }
                 } else if(size == 1) {
                     if(!f_air) {
-                        q_unlock = 1;
-                        f_unlock = 0;
+                        if(unlock_task == NULL) xTaskCreate(unlock, "unlock", 1024, NULL, 3, &unlock_task);
                     }
                 }
-                
             };
         }
 
@@ -676,7 +741,26 @@ void auth_task(void*) {
                 connected[i].connected = false;
             };
         };
+        vTaskDelay(1000 * 1 / portTICK_PERIOD_MS);
     }
+    vTaskDelete(NULL);
+}
+
+void watch_connect_task(void*) {
+    
+    while (1)
+    {
+        if(watch_profile.connected) {
+            watch_task = NULL;
+            vTaskDelete(NULL);
+        }
+        else {
+            esp_ble_gattc_open(watch_profile.itf, watch_addr, 0, true);
+            vTaskDelay(1000 * 3 / portTICK_PERIOD_MS);
+        }
+    }
+    
+    vTaskDelete(NULL);
 }
 
 /*
